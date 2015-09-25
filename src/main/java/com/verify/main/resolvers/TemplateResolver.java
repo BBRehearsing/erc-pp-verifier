@@ -1,18 +1,22 @@
 package com.verify.main.resolvers;
 
 import java.io.File;
+import java.io.FilenameFilter;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import javax.sql.DataSource;
 
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.postgresql.ds.PGPoolingDataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import com.google.gson.internal.LinkedTreeMap;
 import com.verify.main.util.GsonUtil;
 import com.verify.main.util.SSHUtil;
 import com.verify.main.util.XpathUtil;
@@ -27,7 +31,7 @@ public class TemplateResolver {
 	
 	private static String JSON_PATH = "/components/BASE";
 	
-	private static String TEMPLATE_RPM_PATH = "rpms";
+	private static String TEMPLATE_RPM_PATH = "/rpms";
 	
 	public List<Template> resolveActualTemplate(String ip, String dataBaseName,  String userName, String password){
 		
@@ -50,40 +54,82 @@ public class TemplateResolver {
 	
 	//TODO Need to figure out the uncertain path and xpath expression
 	public List<Template> resolveExpectedTemplate(String rootPath) throws IOException{
-		String jsonConfigPath = rootPath + JSON_PATH;
+		String jsonConfigPath = rootPath + JSON_PATH + "/config.json";
 		String templatePath = rootPath + TEMPLATE_RPM_PATH;
 		
 		Map<String, Object> jsonMap = GsonUtil.convertJsonToMap(jsonConfigPath);
+		
+		List<LinkedTreeMap> temp = (List)jsonMap.get("selectorKeys");
+		Map<String, List<String>> convertedMap = new HashMap<String, List<String>>();
+		
+		
+		for(Map<String, String> map : temp){
+			String selectKey = map.get("SELECTIONKEY");
+			String template = map.get("TEMPLATE");
+			
+			if(convertedMap.get(template) == null){
+				List<String> selectKeyList = new ArrayList<String>();
+				selectKeyList.add(selectKey);
+				convertedMap.put(template, selectKeyList);
+			}else{
+				List<String> selectKeyList = convertedMap.get(template);
+				selectKeyList.add(selectKey);
+			}
+		}
 		
 		@SuppressWarnings("unchecked")
 		List<String> rpmList =  (ArrayList<String>) jsonMap.get("templateRpms");
 		
 		String unpackRpmCommand = "cd %s; rpm2cpio %s | cpio -div";
-		String moveToTmp = "mv -r %s /tmp";
-		String unpackParCommand = "cd /tmp/opt/t...; unzip xx.par";
+		String moveToTmp = "mv %s/opt /tmp";
+		String unpackParCommand = "cd /tmp/opt/tandbergtv/cms/workflow/templates/; find . -name \"*.par\" -exec  unzip -n \"{}\" \\;";
 		
 		SSHUtil util = new SSHUtil();
 		util.setHost("localhost");
-		util.setUser("root");
-		util.setPassword("root1234");
+		util.setUser("cms");
+		util.setPassword("1111");
 		
 		List<Template> expectedList = new ArrayList<Template>();
 		
 		for(String templateName : rpmList){
 			unpackRpmCommand = String.format(unpackRpmCommand, templatePath,  templateName);
 			moveToTmp = String.format(moveToTmp, templatePath);
+			unpackParCommand = String.format(unpackParCommand, "");
 			util.runCommand(unpackRpmCommand);
 			util.runCommand(moveToTmp);
 			util.runCommand(unpackParCommand);
 			
-			Template tempalte = new Template();
-			XpathUtil xpathUtil = new XpathUtil("/tmp/opt/.../xxx.jpdl");
-			tempalte.setVersion(xpathUtil.getValue("//xxx/version").get(0));
-			tempalte.setName(xpathUtil.getValue("//xxx/name").get(0));
-			tempalte.setSelectorKey(xpathUtil.getValue("//xxx/selectKey").get(0));
-			expectedList.add(tempalte);
-			File dirToBeDel = new File("/tmp/opt");
+			File parFileDir = new File("/tmp/opt/tandbergtv/cms/workflow/templates/");
 			
+			String[] jpdlFiles = parFileDir.list(new FilenameFilter(){
+				@Override
+				public boolean accept(File dir, String name) {
+					if(name.endsWith("jpdl")){
+						return true;
+					}
+					return false;
+				}
+			});
+			
+			for(String jpdlFile : jpdlFiles){
+				Template tempalte = new Template();
+				XpathUtil xpathUtil = new XpathUtil("/tmp/opt/tandbergtv/cms/workflow/templates/" + jpdlFile);
+				tempalte.setVersion(xpathUtil.getValue("//process-definition/@version").get(0));
+				tempalte.setName(xpathUtil.getValue("//process-definition/@name").get(0));
+				List<String> selectKey = convertedMap.get(tempalte.getName());
+				
+				if(selectKey != null){
+					Object[] strArray = selectKey.toArray();
+					tempalte.setSelectorKey(StringUtils.join(strArray, ","));
+				}else{
+					tempalte.setSelectorKey("");
+				}
+				
+				
+				expectedList.add(tempalte);
+			}
+			
+			File dirToBeDel = new File("/tmp/opt");
 			FileUtils.deleteDirectory(dirToBeDel);
 		}
 		
